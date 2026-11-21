@@ -47,18 +47,18 @@ $(TARGET): $(OBJ)
 run: $(TARGET)
 	./$(TARGET) > $(DATAFILE)
 
-# --- Визуализация траектории через gnuplot ------------------
+# --- Визуализация 3D-траектории через gnuplot ----------------
 plot: run
 	@command -v gnuplot >/dev/null 2>&1 || { \
 		echo "Ошибка: gnuplot не найден. Установите: sudo apt install gnuplot"; \
 		exit 1; \
 	}
 	gnuplot -p -e " \
-		set xlabel 'Дальность, м'; \
-		set ylabel 'Высота, м'; \
-		set title 'Траектория с учётом сопротивления воздуха'; \
-		set grid; \
-		plot '$(DATAFILE)' using 2:3 with lines lw 2 title 'Траектория'"
+		set xlabel 'X, м'; set ylabel 'Z, м'; set zlabel 'Y (высота), м'; \
+		set title '3D-траектория с учётом сопротивления воздуха'; \
+		set grid; set view 60, 30; \
+		set key outside right; \
+		splot '$(DATAFILE)' using 2:4:3 with lines lw 2 title 'Траектория (X, Z, Y)'"
 
 # --- Очистка ------------------------------------------------
 clean:
