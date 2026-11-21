@@ -1,6 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <math.h>
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
 #include <gsl/gsl_odeiv2.h>
 #include <gsl/gsl_errno.h>
 #include <gsl/gsl_math.h>
@@ -33,7 +39,6 @@ int load_config(const char *filename, double *v0, double *angle,
     config_t cfg;
     config_init(&cfg);
 
-    // Чтение конфигурационного файла
     if (!config_read_file(&cfg, filename)) {
         fprintf(stderr, "Ошибка чтения конфигурации: %s:%d - %s\n",
                 config_error_file(&cfg), config_error_line(&cfg),
@@ -42,33 +47,13 @@ int load_config(const char *filename, double *v0, double *angle,
         return -1;
     }
 
-    // Чтение параметров
-    if (!config_lookup_float(&cfg, "v0", v0)) {
-        fprintf(stderr, "Ошибка: параметр 'v0' не найден в %s\n", filename);
-        config_destroy(&cfg);
-        return -1;
-    }
-
-    if (!config_lookup_float(&cfg, "angle", angle)) {
-        fprintf(stderr, "Ошибка: параметр 'angle' не найден в %s\n", filename);
-        config_destroy(&cfg);
-        return -1;
-    }
-
-    if (!config_lookup_float(&cfg, "k_over_m", k_over_m)) {
-        fprintf(stderr, "Ошибка: параметр 'k_over_m' не найден в %s\n", filename);
-        config_destroy(&cfg);
-        return -1;
-    }
-
-    if (!config_lookup_float(&cfg, "x0", x0)) {
-        fprintf(stderr, "Ошибка: параметр 'x0' не найден в %s\n", filename);
-        config_destroy(&cfg);
-        return -1;
-    }
-
-    if (!config_lookup_float(&cfg, "y0", y0)) {
-        fprintf(stderr, "Ошибка: параметр 'y0' не найден в %s\n", filename);
+    if (!config_lookup_float(&cfg, "v0", v0) ||
+        !config_lookup_float(&cfg, "angle", angle) ||
+        !config_lookup_float(&cfg, "k_over_m", k_over_m) ||
+        !config_lookup_float(&cfg, "x0", x0) ||
+        !config_lookup_float(&cfg, "y0", y0)) {
+        fprintf(stderr, "Ошибка: в %s отсутствуют обязательные параметры "
+                "(v0, angle, k_over_m, x0, y0)\n", filename);
         config_destroy(&cfg);
         return -1;
     }
@@ -77,36 +62,111 @@ int load_config(const char *filename, double *v0, double *angle,
     return 0;
 }
 
+// Безопасное преобразование строки в double с обработкой ошибок
+bool parse_double(const char *str, double *out) {
+    char *endptr = NULL;
+    errno = 0;
+    double val = strtod(str, &endptr);
+
+    if (errno != 0) {
+        fprintf(stderr, "Ошибка преобразования числа '%s': %s\n",
+                str, strerror(errno));
+        return false;
+    }
+    if (endptr == str || *endptr != '\0') {
+        fprintf(stderr, "Ошибка: '%s' не является корректным числом\n", str);
+        return false;
+    }
+    *out = val;
+    return true;
+}
+
+// Вывод справки по использованию
+void print_usage(const char *progname) {
+    fprintf(stderr,
+        "Использование: %s [ОПЦИИ] [ФАЙЛ_КОНФИГА]\n"
+        "\n"
+        "ОПЦИИ:\n"
+        "  -v <значение>   Переопределить начальную скорость v0 (м/с)\n"
+        "  -a <значение>   Переопределить угол выстрела angle (градусы)\n"
+        "  -x <значение>   Переопределить начальную координату x0 (м)\n"
+        "  -y <значение>   Переопределить начальную координату y0 (м)\n"
+        "  -h              Показать эту справку\n"
+        "\n"
+        "ФАЙЛ_КОНФИГА      Путь к конфигурационному файлу\n"
+        "                  (по умолчанию: projectile.conf)\n"
+        "\n"
+        "Параметры командной строки имеют приоритет над значениями из конфига.\n",
+        progname);
+}
+
 int main(int argc, char *argv[]) {
+    // Имя конфигурационного файла по умолчанию
     const char *config_file = "projectile.conf";
 
-    // Если передан аргумент, используем его как имя конфигурационного файла
-    if (argc > 1) {
-        config_file = argv[1];
+    // Значения из командной строки и флаги их наличия
+    double opt_v0 = 0.0, opt_angle = 0.0, opt_x0 = 0.0, opt_y0 = 0.0;
+    bool has_v0 = false, has_angle = false, has_x0 = false, has_y0 = false;
+
+    // Разбор опций командной строки
+    int opt;
+    while ((opt = getopt(argc, argv, "v:a:x:y:h")) != -1) {
+        switch (opt) {
+        case 'v':
+            if (!parse_double(optarg, &opt_v0)) return EXIT_FAILURE;
+            has_v0 = true;
+            break;
+        case 'a':
+            if (!parse_double(optarg, &opt_angle)) return EXIT_FAILURE;
+            has_angle = true;
+            break;
+        case 'x':
+            if (!parse_double(optarg, &opt_x0)) return EXIT_FAILURE;
+            has_x0 = true;
+            break;
+        case 'y':
+            if (!parse_double(optarg, &opt_y0)) return EXIT_FAILURE;
+            has_y0 = true;
+            break;
+        case 'h':
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        default:
+            print_usage(argv[0]);
+            return EXIT_FAILURE;
+        }
     }
 
-    // Параметры из конфигурационного файла
-    double v0, angle, k_over_m, x0, y0;
+    // Позиционный аргумент после опций — имя конфигурационного файла
+    if (optind < argc) {
+        config_file = argv[optind];
+    }
 
     // Загрузка конфигурации
+    double v0, angle, k_over_m, x0, y0;
     printf("Загрузка конфигурации из файла: %s\n", config_file);
     if (load_config(config_file, &v0, &angle, &k_over_m, &x0, &y0) != 0) {
         fprintf(stderr, "Не удалось загрузить конфигурацию\n");
         return EXIT_FAILURE;
     }
 
-    printf("Параметры:\n");
-    printf("  v0 = %.2f м/с\n", v0);
-    printf("  angle = %.2f°\n", angle);
-    printf("  k_over_m = %.4f\n", k_over_m);
-    printf("  x0 = %.2f м\n", x0);
-    printf("  y0 = %.2f м\n", y0);
+    // Переопределение значений из командной строки
+    if (has_v0)    v0    = opt_v0;
+    if (has_angle) angle = opt_angle;
+    if (has_x0)    x0    = opt_x0;
+    if (has_y0)    y0    = opt_y0;
+
+    // Вывод итоговых параметров
+    printf("Итоговые параметры:\n");
+    printf("  v0       = %.2f м/с%s\n", v0,    has_v0    ? " (переопределено)" : "");
+    printf("  angle    = %.2f°%s\n",    angle, has_angle ? " (переопределено)" : "");
+    printf("  k_over_m = %.4f\n",       k_over_m);
+    printf("  x0       = %.2f м%s\n",   x0,    has_x0    ? " (переопределено)" : "");
+    printf("  y0       = %.2f м%s\n",   y0,    has_y0    ? " (переопределено)" : "");
     printf("\n");
 
     // Константы
     double g = 9.81;
-
-    // Преобразование угла в радианы
     double angle_rad = angle * M_PI / 180.0;
 
     struct params p = {g, k_over_m};
