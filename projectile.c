@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <gsl/gsl_odeiv2.h>
+#include <gsl/gsl_errno.h>
 
 // Структура для передачи параметров в функцию ОДУ
 struct params {
