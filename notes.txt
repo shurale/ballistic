@@ -1,0 +1,10 @@
+apt install libgsl23 libgslcblas0 libgsl-dev
+
+gcc projectile.c -o projectile -lgsl -lgslcblas -lm
+./projectile > trajectory.dat
+
+# Построение траектории (X от Y)
+gnuplot -p -e "set xlabel 'Дальность, м'; set ylabel 'Высота, м'; set title 'Траектория с учётом сопр.'; plot 'trajectory.dat' using 2:3 with lines lw 2 title 'Траектория'"
+
+# Построение падения модуля скорости от времени
+gnuplot -p -e "set xlabel 'Время, с'; set ylabel 'Скорость, м/с'; set title 'Падение скорости'; plot 'trajectory.dat' using 1:(sqrt(\$4*\$4 + \$5*\$5)) with lines lw 2 title '|V(t)|'"
