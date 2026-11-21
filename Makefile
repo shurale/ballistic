@@ -22,6 +22,7 @@ CFLAGS   += $(shell $(PKGCFG) --cflags gsl)
 
 LDFLAGS  := $(shell $(PKGCFG) --libs-only-L gsl)
 LDLIBS   := $(shell $(PKGCFG) --libs-only-l gsl) -lm
+LDLIBS   += $(shell $(PKGCFG) --libs-only-l libconfig)
 
 # --- Цели по умолчанию --------------------------------------
 .DEFAULT_GOAL := all
