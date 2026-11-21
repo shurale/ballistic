@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <gsl/gsl_odeiv2.h>
 #include <gsl/gsl_errno.h>
 #include <gsl/gsl_math.h>
@@ -15,6 +16,9 @@
 struct params {
     double g;          // Ускорение свободного падения
     double k_over_m;   // Коэффициент сопротивления, деленный на массу (k)
+    double vwx;        // Компонента скорости ветра по X (м/с)
+    double vwy;        // Компонента скорости ветра по Y (м/с)
+    double vwz;        // Компонента скорости ветра по Z (м/с)
 };
 
 // Функция, описывающая систему ОДУ: dy/dt = f(t, y)
@@ -24,21 +28,27 @@ int func(double t, const double y[], double f[], void *params) {
     double vx = y[3];
     double vy = y[4];
     double vz = y[5];
-    double v = sqrt(vx * vx + vy * vy + vz * vz); // Модуль скорости в 3D
+
+    // Относительная скорость тела относительно воздуха
+    double vrx = vx - p->vwx;
+    double vry = vy - p->vwy;
+    double vrz = vz - p->vwz;
+    double vr = sqrt(vrx * vrx + vry * vry + vrz * vrz); // Модуль относительной скорости
 
     f[0] = vx;                            // dx/dt
     f[1] = vy;                            // dy/dt
     f[2] = vz;                            // dz/dt
-    f[3] = -p->k_over_m * v * vx;         // dvx/dt
-    f[4] = -p->g - p->k_over_m * v * vy;  // dvy/dt
-    f[5] = -p->k_over_m * v * vz;         // dvz/dt
+    f[3] = -p->k_over_m * vr * vrx;       // dvx/dt
+    f[4] = -p->g - p->k_over_m * vr * vry;// dvy/dt
+    f[5] = -p->k_over_m * vr * vrz;       // dvz/dt
 
     return GSL_SUCCESS;
 }
 
 // Функция для чтения конфигурационного файла
 int load_config(const char *filename, double *v0, double *angle, double *azimuth,
-                double *k_over_m, double *x0, double *y0, double *z0) {
+                double *k_over_m, double *x0, double *y0, double *z0,
+                double *windspeed, double *winddir) {
     config_t cfg;
     config_init(&cfg);
 
@@ -56,9 +66,10 @@ int load_config(const char *filename, double *v0, double *angle, double *azimuth
         !config_lookup_float(&cfg, "k_over_m", k_over_m) ||
         !config_lookup_float(&cfg, "x0", x0) ||
         !config_lookup_float(&cfg, "y0", y0) ||
-        !config_lookup_float(&cfg, "z0", z0)) {
-        fprintf(stderr, "Ошибка: в %s отсутствуют обязательные параметры "
-                "(v0, angle, azimuth, k_over_m, x0, y0, z0)\n", filename);
+        !config_lookup_float(&cfg, "z0", z0) ||
+        !config_lookup_float(&cfg, "windspeed", windspeed) ||
+        !config_lookup_float(&cfg, "winddir", winddir)) {
+        fprintf(stderr, "Ошибка: в %s отсутствуют обязательные параметры\n", filename);
         config_destroy(&cfg);
         return -1;
     }
@@ -91,7 +102,7 @@ void print_usage(const char *progname) {
     fprintf(stderr,
         "Использование: %s [ОПЦИИ] [ФАЙЛ_КОНФИГА]\n"
         "\n"
-        "ОПЦИИ:\n"
+        "Короткие опции:\n"
         "  -v <значение>   Переопределить начальную скорость v0 (м/с)\n"
         "  -a <значение>   Переопределить угол возвышения angle (градусы)\n"
         "  -w <значение>   Переопределить азимут azimuth (градусы)\n"
@@ -99,6 +110,10 @@ void print_usage(const char *progname) {
         "  -y <значение>   Переопределить начальную координату y0 (м)\n"
         "  -z <значение>   Переопределить начальную координату z0 (м)\n"
         "  -h              Показать эту справку\n"
+        "\n"
+        "Длинные опции:\n"
+        "  --wspeed <значение>   Переопределить скорость ветра windspeed (м/с)\n"
+        "  --wdir <значение>     Переопределить направление ветра winddir (градусы)\n"
         "\n"
         "ФАЙЛ_КОНФИГА      Путь к конфигурационному файлу\n"
         "                  (по умолчанию: projectile.conf)\n"
@@ -113,12 +128,24 @@ int main(int argc, char *argv[]) {
     // Значения из командной строки и флаги их наличия
     double opt_v0 = 0.0, opt_angle = 0.0, opt_azimuth = 0.0;
     double opt_x0 = 0.0, opt_y0 = 0.0, opt_z0 = 0.0;
+    double opt_windspeed = 0.0, opt_winddir = 0.0;
     bool has_v0 = false, has_angle = false, has_azimuth = false;
     bool has_x0 = false, has_y0 = false, has_z0 = false;
+    bool has_windspeed = false, has_winddir = false;
 
-    // Разбор опций командной строки
+    // Определение длинных опций
+    static struct option long_options[] = {
+        {"wspeed", required_argument, 0, 'S'},
+        {"wdir",   required_argument, 0, 'D'},
+        {"help",   no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    // Разбор опций командной строки (короткие + длинные)
     int opt;
-    while ((opt = getopt(argc, argv, "v:a:w:x:y:z:h")) != -1) {
+    int option_index = 0;
+    while ((opt = getopt_long(argc, argv, "v:a:w:x:y:z:hS:D:",
+                              long_options, &option_index)) != -1) {
         switch (opt) {
         case 'v':
             if (!parse_double(optarg, &opt_v0)) return EXIT_FAILURE;
@@ -144,6 +171,14 @@ int main(int argc, char *argv[]) {
             if (!parse_double(optarg, &opt_z0)) return EXIT_FAILURE;
             has_z0 = true;
             break;
+        case 'S':  // --wspeed
+            if (!parse_double(optarg, &opt_windspeed)) return EXIT_FAILURE;
+            has_windspeed = true;
+            break;
+        case 'D':  // --wdir
+            if (!parse_double(optarg, &opt_winddir)) return EXIT_FAILURE;
+            has_winddir = true;
+            break;
         case 'h':
             print_usage(argv[0]);
             return EXIT_SUCCESS;
@@ -160,40 +195,51 @@ int main(int argc, char *argv[]) {
 
     // Загрузка конфигурации
     double v0, angle, azimuth, k_over_m, x0, y0, z0;
+    double windspeed, winddir;
     printf("Загрузка конфигурации из файла: %s\n", config_file);
-    if (load_config(config_file, &v0, &angle, &azimuth, &k_over_m, &x0, &y0, &z0) != 0) {
+    if (load_config(config_file, &v0, &angle, &azimuth, &k_over_m, &x0, &y0, &z0,
+                    &windspeed, &winddir) != 0) {
         fprintf(stderr, "Не удалось загрузить конфигурацию\n");
         return EXIT_FAILURE;
     }
 
     // Переопределение значений из командной строки
-    if (has_v0)       v0      = opt_v0;
-    if (has_angle)    angle   = opt_angle;
-    if (has_azimuth)  azimuth = opt_azimuth;
-    if (has_x0)       x0      = opt_x0;
-    if (has_y0)       y0      = opt_y0;
-    if (has_z0)       z0      = opt_z0;
+    if (has_v0)       v0        = opt_v0;
+    if (has_angle)    angle     = opt_angle;
+    if (has_azimuth)  azimuth   = opt_azimuth;
+    if (has_x0)       x0        = opt_x0;
+    if (has_y0)       y0        = opt_y0;
+    if (has_z0)       z0        = opt_z0;
+    if (has_windspeed) windspeed = opt_windspeed;
+    if (has_winddir)  winddir   = opt_winddir;
 
     // Вывод итоговых параметров
     printf("Итоговые параметры:\n");
-    printf("  v0       = %.2f м/с%s\n",  v0,      has_v0      ? " (переопределено)" : "");
-    printf("  angle    = %.2f°%s\n",     angle,   has_angle   ? " (переопределено)" : "");
-    printf("  azimuth  = %.2f°%s\n",     azimuth, has_azimuth ? " (переопределено)" : "");
-    printf("  k_over_m = %.4f\n",        k_over_m);
-    printf("  x0       = %.2f м%s\n",    x0,      has_x0      ? " (переопределено)" : "");
-    printf("  y0       = %.2f м%s\n",    y0,      has_y0      ? " (переопределено)" : "");
-    printf("  z0       = %.2f м%s\n",    z0,      has_z0      ? " (переопределено)" : "");
+    printf("  v0         = %.2f м/с%s\n",  v0,        has_v0        ? " (переопределено)" : "");
+    printf("  angle      = %.2f°%s\n",     angle,     has_angle     ? " (переопределено)" : "");
+    printf("  azimuth    = %.2f°%s\n",     azimuth,   has_azimuth   ? " (переопределено)" : "");
+    printf("  k_over_m   = %.4f\n",        k_over_m);
+    printf("  x0         = %.2f м%s\n",    x0,        has_x0        ? " (переопределено)" : "");
+    printf("  y0         = %.2f м%s\n",    y0,        has_y0        ? " (переопределено)" : "");
+    printf("  z0         = %.2f м%s\n",    z0,        has_z0        ? " (переопределено)" : "");
+    printf("  windspeed  = %.2f м/с%s\n",  windspeed, has_windspeed ? " (переопределено)" : "");
+    printf("  winddir    = %.2f°%s\n",     winddir,   has_winddir   ? " (переопределено)" : "");
     printf("\n");
 
     // Константы
     double g = 9.81;
     double angle_rad   = angle   * M_PI / 180.0;
     double azimuth_rad = azimuth * M_PI / 180.0;
+    double winddir_rad = winddir * M_PI / 180.0;
 
-    struct params p = {g, k_over_m};
+    // Компоненты скорости ветра
+    double vwx = windspeed * cos(winddir_rad);
+    double vwy = 0.0;  // Ветер горизонтальный
+    double vwz = windspeed * sin(winddir_rad);
+
+    struct params p = {g, k_over_m, vwx, vwy, vwz};
 
     // Начальные условия: [x0, y0, z0, vx0, vy0, vz0]
-    // Компоненты скорости через сферические координаты
     double vx0 = v0 * cos(angle_rad) * cos(azimuth_rad);
     double vy0 = v0 * sin(angle_rad);
     double vz0 = v0 * cos(angle_rad) * sin(azimuth_rad);
