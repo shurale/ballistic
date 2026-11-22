@@ -12,6 +12,14 @@
 #include <gsl/gsl_math.h>
 #include <libconfig.h>
 
+// --- Счётчик вызовов функции ОДУ ----------------------------
+// Глобальная статистика (для простоты; в production — через params)
+static size_t g_func_calls = 0;
+static size_t g_steps      = 0;
+static double g_h_min      =  INFINITY;
+static double g_h_max      = 0.0;
+static double g_h_sum      = 0.0;
+
 // Структура для передачи параметров в функцию ОДУ
 struct params {
     double g;          // Ускорение свободного падения
@@ -24,6 +32,8 @@ struct params {
 // Функция, описывающая систему ОДУ: dy/dt = f(t, y)
 // Вектор состояния: [x, y, z, vx, vy, vz]
 int func(double t, const double y[], double f[], void *params) {
+    g_func_calls++;
+
     struct params *p = (struct params *)params;
     double vx = y[3];
     double vy = y[4];
@@ -264,6 +274,7 @@ int main(int argc, char *argv[]) {
     // Интегрирование до момента падения на землю (y <= 0)
     while (y[1] > 0.0 || t == 0.0) {
         int status = gsl_odeiv2_driver_apply(d, &t, t1, y);
+	g_steps++;
 
         if (status != GSL_SUCCESS) {
             printf("Ошибка интегрирования: %d\n", status);
@@ -274,6 +285,15 @@ int main(int argc, char *argv[]) {
                t, y[0], y[1], y[2], y[3], y[4], y[5]);
         t1 += 0.01;
     }
+
+    // --- Итоговая статистика ---------------------------------
+    printf("\n# === Статистика интегрирования ===\n");
+    // printf("# Метод              : %s (порядок %d)\n",
+    //       gsl_odeiv2_step_name(step), gsl_odeiv2_step_order(step));
+    printf("# Всего шагов        : %zu\n", g_steps);
+    printf("# Вызовов func       : %zu\n", g_func_calls);
+    printf("# Вызовов на шаг     : %.2f\n",
+           g_steps ? (double)g_func_calls / g_steps : 0.0);
 
     // Освобождение памяти
     gsl_odeiv2_driver_free(d);
