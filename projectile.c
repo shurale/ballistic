@@ -13,49 +13,66 @@
 #include <libconfig.h>
 
 // --- Счётчик вызовов функции ОДУ ----------------------------
-// Глобальная статистика (для простоты; в production — через params)
 static size_t g_func_calls = 0;
 static size_t g_steps      = 0;
-static double g_h_min      =  INFINITY;
-static double g_h_max      = 0.0;
-static double g_h_sum      = 0.0;
 
 // Структура для передачи параметров в функцию ОДУ
 struct params {
-    double g;          // Ускорение свободного падения
-    double k_over_m;   // Коэффициент сопротивления, деленный на массу (k)
-    double vwx;        // Компонента скорости ветра по X (м/с)
-    double vwy;        // Компонента скорости ветра по Y (м/с)
-    double vwz;        // Компонента скорости ветра по Z (м/с)
+    double g;
+    double k_over_m;
+    double vwx, vwy, vwz;
 };
 
 // Функция, описывающая систему ОДУ: dy/dt = f(t, y)
-// Вектор состояния: [x, y, z, vx, vy, vz]
 int func(double t, const double y[], double f[], void *params) {
     g_func_calls++;
-
     struct params *p = (struct params *)params;
     double vx = y[3];
     double vy = y[4];
     double vz = y[5];
-
-    // Относительная скорость тела относительно воздуха
     double vrx = vx - p->vwx;
     double vry = vy - p->vwy;
     double vrz = vz - p->vwz;
-    double vr = sqrt(vrx * vrx + vry * vry + vrz * vrz); // Модуль относительной скорости
+    double vr = sqrt(vrx * vrx + vry * vry + vrz * vrz);
 
-    f[0] = vx;                            // dx/dt
-    f[1] = vy;                            // dy/dt
-    f[2] = vz;                            // dz/dt
-    f[3] = -p->k_over_m * vr * vrx;       // dvx/dt
-    f[4] = -p->g - p->k_over_m * vr * vry;// dvy/dt
-    f[5] = -p->k_over_m * vr * vrz;       // dvz/dt
-
+    f[0] = vx;
+    f[1] = vy;
+    f[2] = vz;
+    f[3] = -p->k_over_m * vr * vrx;
+    f[4] = -p->g - p->k_over_m * vr * vry;
+    f[5] = -p->k_over_m * vr * vrz;
     return GSL_SUCCESS;
 }
 
-// Функция для чтения конфигурационного файла
+// --- Функции интерполяции -----------------------------------
+
+// Точка траектории
+typedef struct {
+    double t, x, y, z, vx, vy, vz;
+} traj_point_t;
+
+// Прямая квадратичная интерполяция Лагранжа: q(t) по 3 точкам
+static double lagrange_q(double t,
+                         double t0, double q0,
+                         double t1, double q1,
+                         double t2, double q2) {
+    double L0 = (t - t1) * (t - t2) / ((t0 - t1) * (t0 - t2));
+    double L1 = (t - t0) * (t - t2) / ((t1 - t0) * (t1 - t2));
+    double L2 = (t - t0) * (t - t1) / ((t2 - t0) * (t2 - t1));
+    return q0 * L0 + q1 * L1 + q2 * L2;
+}
+
+// Обратная квадратичная интерполяция: найти t*, при котором y(t*) = 0
+static double inverse_quad_root(double t0, double y0,
+                                double t1, double y1,
+                                double t2, double y2) {
+    double L0 = (0.0 - y1) * (0.0 - y2) / ((y0 - y1) * (y0 - y2));
+    double L1 = (0.0 - y0) * (0.0 - y2) / ((y1 - y0) * (y1 - y2));
+    double L2 = (0.0 - y0) * (0.0 - y1) / ((y2 - y0) * (y2 - y1));
+    return t0 * L0 + t1 * L1 + t2 * L2;
+}
+
+// --- Загрузка конфигурации ----------------------------------
 int load_config(const char *filename, double *v0, double *angle, double *azimuth,
                 double *k_over_m, double *x0, double *y0, double *z0,
                 double *windspeed, double *winddir) {
@@ -88,12 +105,10 @@ int load_config(const char *filename, double *v0, double *angle, double *azimuth
     return 0;
 }
 
-// Безопасное преобразование строки в double с обработкой ошибок
 bool parse_double(const char *str, double *out) {
     char *endptr = NULL;
     errno = 0;
     double val = strtod(str, &endptr);
-
     if (errno != 0) {
         fprintf(stderr, "Ошибка преобразования числа '%s': %s\n",
                 str, strerror(errno));
@@ -107,7 +122,6 @@ bool parse_double(const char *str, double *out) {
     return true;
 }
 
-// Вывод справки по использованию
 void print_usage(const char *progname) {
     fprintf(stderr,
         "Использование: %s [ОПЦИИ] [ФАЙЛ_КОНФИГА]\n"
@@ -135,7 +149,6 @@ void print_usage(const char *progname) {
 int main(int argc, char *argv[]) {
     const char *config_file = "projectile.conf";
 
-    // Значения из командной строки и флаги их наличия
     double opt_v0 = 0.0, opt_angle = 0.0, opt_azimuth = 0.0;
     double opt_x0 = 0.0, opt_y0 = 0.0, opt_z0 = 0.0;
     double opt_windspeed = 0.0, opt_winddir = 0.0;
@@ -143,7 +156,6 @@ int main(int argc, char *argv[]) {
     bool has_x0 = false, has_y0 = false, has_z0 = false;
     bool has_windspeed = false, has_winddir = false;
 
-    // Определение длинных опций
     static struct option long_options[] = {
         {"wspeed", required_argument, 0, 'S'},
         {"wdir",   required_argument, 0, 'D'},
@@ -151,7 +163,6 @@ int main(int argc, char *argv[]) {
         {0, 0, 0, 0}
     };
 
-    // Разбор опций командной строки (короткие + длинные)
     int opt;
     int option_index = 0;
     while ((opt = getopt_long(argc, argv, "v:a:w:x:y:z:hS:D:",
@@ -181,11 +192,11 @@ int main(int argc, char *argv[]) {
             if (!parse_double(optarg, &opt_z0)) return EXIT_FAILURE;
             has_z0 = true;
             break;
-        case 'S':  // --wspeed
+        case 'S':
             if (!parse_double(optarg, &opt_windspeed)) return EXIT_FAILURE;
             has_windspeed = true;
             break;
-        case 'D':  // --wdir
+        case 'D':
             if (!parse_double(optarg, &opt_winddir)) return EXIT_FAILURE;
             has_winddir = true;
             break;
@@ -198,12 +209,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Позиционный аргумент после опций — имя конфигурационного файла
     if (optind < argc) {
         config_file = argv[optind];
     }
 
-    // Загрузка конфигурации
     double v0, angle, azimuth, k_over_m, x0, y0, z0;
     double windspeed, winddir;
     printf("Загрузка конфигурации из файла: %s\n", config_file);
@@ -213,7 +222,6 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Переопределение значений из командной строки
     if (has_v0)       v0        = opt_v0;
     if (has_angle)    angle     = opt_angle;
     if (has_azimuth)  azimuth   = opt_azimuth;
@@ -223,7 +231,6 @@ int main(int argc, char *argv[]) {
     if (has_windspeed) windspeed = opt_windspeed;
     if (has_winddir)  winddir   = opt_winddir;
 
-    // Вывод итоговых параметров
     printf("Итоговые параметры:\n");
     printf("  v0         = %.2f м/с%s\n",  v0,        has_v0        ? " (переопределено)" : "");
     printf("  angle      = %.2f°%s\n",     angle,     has_angle     ? " (переопределено)" : "");
@@ -236,45 +243,45 @@ int main(int argc, char *argv[]) {
     printf("  winddir    = %.2f°%s\n",     winddir,   has_winddir   ? " (переопределено)" : "");
     printf("\n");
 
-    // Константы
     double g = 9.81;
     double angle_rad   = angle   * M_PI / 180.0;
     double azimuth_rad = azimuth * M_PI / 180.0;
     double winddir_rad = winddir * M_PI / 180.0;
 
-    // Компоненты скорости ветра
     double vwx = windspeed * cos(winddir_rad);
-    double vwy = 0.0;  // Ветер горизонтальный
+    double vwy = 0.0;
     double vwz = windspeed * sin(winddir_rad);
 
     struct params p = {g, k_over_m, vwx, vwy, vwz};
 
-    // Начальные условия: [x0, y0, z0, vx0, vy0, vz0]
     double vx0 = v0 * cos(angle_rad) * cos(azimuth_rad);
     double vy0 = v0 * sin(angle_rad);
     double vz0 = v0 * cos(angle_rad) * sin(azimuth_rad);
 
     double y[6] = {x0, y0, z0, vx0, vy0, vz0};
 
-    // Инициализация системы ОДУ (размерность 6)
     gsl_odeiv2_system sys = {func, NULL, 6, &p};
-
-    // Создание драйвера с адаптивным шагом
     gsl_odeiv2_driver *d = gsl_odeiv2_driver_alloc_y_new(&sys, gsl_odeiv2_step_rk8pd,
                                                          1e-6, 1e-6, 0.0);
 
     double t = 0.0;
-    double t1 = 0.01; // Шаг вывода данных на экран
+    double t1 = 0.01;
 
-    // Выводим заголовок для gnuplot
     printf("# t\tx\ty\tz\tvx\tvy\tvz\n");
     printf("%.3f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
            t, y[0], y[1], y[2], y[3], y[4], y[5]);
 
-    // Интегрирование до момента падения на землю (y <= 0)
+    // Буфер последних 3 точек траектории
+    traj_point_t pts[3];
+    int n_pts = 0;
+
+    // Сохраняем начальную точку
+    pts[0] = (traj_point_t){t, y[0], y[1], y[2], y[3], y[4], y[5]};
+    n_pts = 1;
+
     while (y[1] > 0.0 || t == 0.0) {
         int status = gsl_odeiv2_driver_apply(d, &t, t1, y);
-	g_steps++;
+        g_steps++;
 
         if (status != GSL_SUCCESS) {
             printf("Ошибка интегрирования: %d\n", status);
@@ -283,19 +290,80 @@ int main(int argc, char *argv[]) {
 
         printf("%.3f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",
                t, y[0], y[1], y[2], y[3], y[4], y[5]);
+
+        // Сохраняем точку в буфер
+        if (n_pts < 3) {
+            pts[n_pts++] = (traj_point_t){t, y[0], y[1], y[2], y[3], y[4], y[5]};
+        } else {
+            pts[0] = pts[1];
+            pts[1] = pts[2];
+            pts[2] = (traj_point_t){t, y[0], y[1], y[2], y[3], y[4], y[5]};
+        }
+
         t1 += 0.01;
     }
 
+    // --- Точное вычисление точки падения ---------------------
+    if (n_pts >= 3 && pts[2].y < 0.0) {
+        // Обратная квадратичная интерполяция: t* при y=0
+        double t_impact = inverse_quad_root(
+            pts[0].t, pts[0].y,
+            pts[1].t, pts[1].y,
+            pts[2].t, pts[2].y);
+
+        // Прямая интерполяция координат и скоростей в t*
+        double x_imp  = lagrange_q(t_impact, pts[0].t, pts[0].x,  pts[1].t, pts[1].x,  pts[2].t, pts[2].x);
+        double z_imp  = lagrange_q(t_impact, pts[0].t, pts[0].z,  pts[1].t, pts[1].z,  pts[2].t, pts[2].z);
+        double vx_imp = lagrange_q(t_impact, pts[0].t, pts[0].vx, pts[1].t, pts[1].vx, pts[2].t, pts[2].vx);
+        double vy_imp = lagrange_q(t_impact, pts[0].t, pts[0].vy, pts[1].t, pts[1].vy, pts[2].t, pts[2].vy);
+        double vz_imp = lagrange_q(t_impact, pts[0].t, pts[0].vz, pts[1].t, pts[1].vz, pts[2].t, pts[2].vz);
+
+        // Абсолютная скорость
+        double v_imp = sqrt(vx_imp * vx_imp + vy_imp * vy_imp + vz_imp * vz_imp);
+        double v_horiz = sqrt(vx_imp * vx_imp + vz_imp * vz_imp);
+
+        // Угол к горизонту (отрицательный при падении)
+        double angle_impact = atan2(vy_imp, v_horiz) * 180.0 / M_PI;
+
+        // Азимут вектора скорости в точке падения
+        double azimuth_impact = atan2(vz_imp, vx_imp) * 180.0 / M_PI;
+
+        // Угол сноса
+        double drift = azimuth_impact - azimuth;
+        while (drift > 180.0)  drift -= 360.0;
+        while (drift < -180.0) drift += 360.0;
+
+        // Дальность
+        double dx = x_imp - x0;
+        double dz = z_imp - z0;
+        double range_horiz = sqrt(dx * dx + dz * dz);
+        double range_3d = sqrt(dx * dx + y0 * y0 + dz * dz);
+
+        // Вывод результатов
+        printf("#\n");
+        printf("# === Точные характеристики точки падения (квадратичная интерполяция) ===\n");
+        printf("# Время падения           : %.4f с\n", t_impact);
+        printf("# Координаты падения      : x = %.4f м, y = 0 м, z = %.4f м\n", x_imp, z_imp);
+        printf("# Горизонтальная дальность: %.2f м\n", range_horiz);
+        printf("# Полная 3D-дальность     : %.2f м\n", range_3d);
+        printf("# Скорость в точке падения: %.2f м/с (%.1f%% от начальной)\n",
+               v_imp, v_imp / v0 * 100.0);
+        printf("# Угол к горизонту        : %.2f°\n", angle_impact);
+        printf("# Азимут вектора скорости : %.2f°\n", azimuth_impact);
+        printf("# Угол сноса              : %.2f°\n", drift);
+    } else {
+        printf("#\n");
+        printf("# Недостаточно данных для интерполяции точки падения\n");
+    }
+
     // --- Итоговая статистика ---------------------------------
-    printf("\n# === Статистика интегрирования ===\n");
-    // printf("# Метод              : %s (порядок %d)\n",
-    //       gsl_odeiv2_step_name(step), gsl_odeiv2_step_order(step));
+    printf("#\n");
+    printf("# === Статистика интегрирования ===\n");
     printf("# Всего шагов        : %zu\n", g_steps);
     printf("# Вызовов func       : %zu\n", g_func_calls);
     printf("# Вызовов на шаг     : %.2f\n",
            g_steps ? (double)g_func_calls / g_steps : 0.0);
 
-    // Освобождение памяти
     gsl_odeiv2_driver_free(d);
     return EXIT_SUCCESS;
 }
