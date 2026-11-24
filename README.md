@@ -25,7 +25,7 @@
 ```./projectile```
 
 ### Запуск с альтернативным конфигом
-```./projectile custom.conf```
+```./projectile cannon.conf```
 
 ### Переопределить только начальную скорость
 ```./projectile -v 120```
